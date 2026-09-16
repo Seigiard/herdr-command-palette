@@ -1,0 +1,9 @@
+[[keys.command]]
+key = "cmd+shift+p"
+type = "plugin_action"
+command = "seigi.command-palette.open"
+
+[[keys.command]]
+key = "cmd+w"
+type = "plugin_action"
+command = "seigi.command-palette.smart_close"

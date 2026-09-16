@@ -1,0 +1,29 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.9", "3.x"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.25.x"
+      - name: Install fzf
+        run: |
+          go install github.com/junegunn/fzf@v0.65.2
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - run: make lint
+      - run: make test
