@@ -115,14 +115,6 @@ def command_config_path() -> Path:
     return legacy_plugin_config
 
 
-def ensure_config() -> Path:
-    path = command_config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if not path.exists():
-        path.write_text("\n")
-    return path
-
-
 def strip_toml_comment(line: str) -> str:
     in_single = False
     in_double = False
@@ -519,7 +511,7 @@ def normalize_group_order(commands: list[Command]) -> list[Command]:
 
 
 def load_commands() -> tuple[Path, list[Command]]:
-    path = ensure_config()
+    path = command_config_path()
     commands: list[Command] = []
     target_cwd = launch_cwd()
     _, repository = git_project_context(target_cwd)

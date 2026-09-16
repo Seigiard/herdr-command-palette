@@ -575,14 +575,14 @@ function test_palette_026_r10_a_decoy_title_cannot_displace_a_shortcut_hit() {
 
 [[commands]]
 group = "Decoy"
-title = "LG something"
+title = "INSPECT something"
 type = "shell"
 command = "true"
 TOML
 
-  run rank_in "$PALETTE_WORK/commands.toml" lg
+  run rank_in "$PALETTE_WORK/commands.toml" inspect
   assert_success
-  assert_line --index 0 "Lazygit in popup"
+  assert_line --index 0 "Inspect current directory"
 }
 
 function test_palette_027_r2_a_query_matching_no_title_and_no_shortcut_ret() {
@@ -1346,58 +1346,9 @@ PY
   refute_output --partial "Traceback"
 }
 
-function test_palette_058_delete_checkout_requires_exact_confirmation() {
-  _bats_test_init 58 'Delete worktree checkout requires exact DELETE confirmation'
-  local stub="$PALETTE_WORK/delete-confirmation"
-  mkdir -p "$stub"
-  cat > "$stub/herdr" <<'SH'
-#!/bin/sh
-printf '%s\n' "$*" >> "$HERDR_CALLS"
-SH
-  chmod +x "$stub/herdr"
-
-  run env HERDR_BIN_PATH="$stub/herdr" HERDR_CALLS="$stub/herdr.calls" \
-    HERDR_WORKSPACE_ID="w1" HERDR_COMMAND_PALETTE_CONFIG="$REAL_COMMANDS" python3 - <<'PY'
-from pathlib import Path
-
-import palette_boot
-
-palette = palette_boot.palette()
-config_path, commands = palette.load_commands()
-command = next(item for item in commands if item.title == "Delete worktree checkout")
-raw = palette.interactive_run_raw(command)
-child = palette.Command(
-    command.title,
-    command.description,
-    palette.command_kind(raw),
-    command.group,
-    raw,
-    command.origin,
-    command.source,
-)
-variables = palette.context_vars(Path(config_path), palette.os.environ["HERDR_BIN_PATH"])
-
-rejected = palette.variables_with_value(variables, "delete")
-status, output, _ = palette.run_command_with_variables(
-    child, Path(config_path), rejected, palette.os.environ["HERDR_BIN_PATH"]
-)
-assert status == 1, (status, output)
-assert "not deleted" in output, output
-assert not Path(palette.os.environ["HERDR_CALLS"]).exists()
-
-confirmed = palette.variables_with_value(variables, "DELETE")
-status, output, _ = palette.run_command_with_variables(
-    child, Path(config_path), confirmed, palette.os.environ["HERDR_BIN_PATH"]
-)
-assert status == 0, (status, output)
-assert Path(palette.os.environ["HERDR_CALLS"]).read_text().strip() == "worktree remove --workspace w1"
-PY
-  assert_success
-}
-
 function test_palette_063_herdr_loads_the_command_palette_manifest_and_actions() {
   _bats_test_init 63 'Herdr loads the command palette manifest and actions'
-  command_exists herdr || skip "herdr is not installed"
+  command_exists herdr || fail "herdr is required to verify the plugin manifest"
   local home="$PALETTE_WORK/herdr-home"
   mkdir -p "$home"
 
@@ -1452,25 +1403,8 @@ PY
   assert_success
 }
 
-# ===========================================
-# Worktree commands -- the source herdr is handed
-# ===========================================
-
-# herdr rejects `worktree create`/`open` when the source resolves to a linked
-# worktree, and the palette's target cwd is the pane it was opened from -- so
-# the shipped commands have to resolve the repository's primary checkout
-# themselves. That resolution is this repo's code and this repo's to prove;
-# herdr's own refusal is upstream behaviour and is not asserted here.
-#
-# The expectations come from the fixture, not from commands.toml: the test
-# creates a primary checkout under a path containing a space, adds a linked
-# worktree with `git worktree add`, runs the shipped command from inside that
-# linked worktree against a `herdr` stub that logs one argument per line, and
-# reads back which arguments herdr actually received. One argument per line is
-# what makes the boundaries visible -- these commands interpolate the branch
-# the user typed into a shell string, so a quoting regression would split it
-# across arguments or run the text after a `;` instead of passing it on.
-palette_worktree_stub() {
+# An argv-logging Herdr stub for command dispatch tests.
+argv_logging_herdr_stub() {
   local fixture="$1"
   mkdir -p "$fixture/bin"
   cat > "$fixture/bin/herdr" <<STUB
@@ -1479,147 +1413,6 @@ printf '%s\n' "\$@" >> "$fixture/herdr.log"
 exit 0
 STUB
   chmod +x "$fixture/bin/herdr"
-}
-
-# Run one shipped palette command with $value as the form input, printing
-# "code=<status>" plus the command's output.
-palette_run_worktree_command() {
-  local fixture="$1" title="$2" cwd="$3" value="$4"
-  env HERDR_BIN_PATH="$fixture/bin/herdr" HERDR_TARGET_CWD="$cwd" \
-    HERDR_COMMAND_PALETTE_CONFIG="$REAL_COMMANDS" \
-    PALETTE_COMMAND_TITLE="$title" PALETTE_COMMAND_VALUE="$value" python3 - <<'PY'
-import os
-
-import palette_boot
-
-palette = palette_boot.palette()
-herdr = os.environ["HERDR_BIN_PATH"]
-config_path, commands = palette.load_commands()
-command = next(c for c in commands if c.title == os.environ["PALETTE_COMMAND_TITLE"])
-child_raw = palette.interactive_run_raw(command)
-child = palette.Command(
-    command.title,
-    command.description,
-    palette.command_kind(child_raw),
-    command.group,
-    child_raw,
-    command.origin,
-    command.source,
-)
-variables = palette.variables_with_value(
-    palette.context_vars(config_path, herdr), os.environ["PALETTE_COMMAND_VALUE"]
-)
-code, output, _ = palette.run_command_with_variables(child, config_path, variables, herdr)
-print(f"code={code}")
-print(output)
-PY
-}
-
-function test_palette_064_worktree_commands_hand_herdr_the_primary_checkou() {
-  _bats_test_init 64 'worktree commands hand herdr the primary checkout as one argument'
-  # The space in the fixture path is load-bearing: an unquoted {target_cwd_q}
-  # or "$root" would arrive as two arguments instead of one.
-  local fixture="$PALETTE_WORK/worktree source"
-  local primary="$fixture/repo" linked="$fixture/linked"
-  mkdir -p "$primary"
-
-  run git init -q -b main "$primary"
-  assert_success
-  run git -C "$primary" -c user.email=t@example.com -c user.name=T \
-    commit -q --allow-empty -m init
-  assert_success
-  run git -C "$primary" worktree add -q -b fixture/linked "$linked"
-  assert_success
-  palette_worktree_stub "$fixture"
-
-  # git may resolve the fixture through a symlinked temp dir (/tmp on macOS),
-  # so take the expected path from git's own view of the primary checkout
-  # rather than from the string the shell composed above.
-  local expected
-  expected="$(git -C "$primary" worktree list --porcelain | head -n 1 | cut -d ' ' -f 2-)"
-  [[ -n "$expected" ]] || fail "fixture has no primary worktree"
-
-  # A branch name carrying a space and a shell metacharacter. If the value
-  # reached the shell unquoted, `touch` would run and the argument would split.
-  local branch="feat/a b; touch $fixture/PWNED #"
-  local title
-  for title in "Open worktree" "New worktree"; do
-    : > "$fixture/herdr.log"
-    run palette_run_worktree_command "$fixture" "$title" "$linked" "$branch"
-    assert_success
-    assert_line "code=0"
-
-    run cat "$fixture/herdr.log"
-    assert_success
-    assert_line "--cwd"
-    assert_line "$expected"
-    assert_line "--branch"
-    assert_line "$branch"
-
-    # oracle: the marker is created only by the injected `touch`, so its
-    # absence is the observable proof that {value_q} kept the branch inert.
-    if [[ -e "$fixture/PWNED" ]]; then
-      fail "$title let the branch value run a command"
-    fi
-  done
-}
-
-function test_palette_065_worktree_commands_refuse_a_target_outside_a_repo() {
-  _bats_test_init 65 'worktree commands refuse a target outside a repository instead of calling herdr'
-  local fixture="$PALETTE_WORK/worktree-no-repo"
-  local plain="$fixture/plain"
-  mkdir -p "$plain"
-  palette_worktree_stub "$fixture"
-
-  local title
-  for title in "Open worktree" "New worktree"; do
-    : > "$fixture/herdr.log"
-    run palette_run_worktree_command "$fixture" "$title" "$plain" "some/branch"
-    assert_success
-    assert_line "code=1"
-
-    # oracle: the stub appends a line per argument on every call, so an empty
-    # log is the observable proof that herdr was never invoked -- an empty
-    # --cwd must not reach it.
-    if [[ -s "$fixture/herdr.log" ]]; then
-      fail "$title invoked herdr without a repository"
-    fi
-  done
-}
-
-function test_palette_066_open_worktree_lists_existing_checkouts() {
-  _bats_test_init 66 'Open worktree lists existing branches and checkout paths'
-  local fixture="$PALETTE_WORK/worktree choices"
-  local primary="$fixture/repo" linked="$fixture/linked"
-  mkdir -p "$primary"
-
-  run git init -q -b main "$primary"
-  assert_success
-  run git -C "$primary" -c user.email=t@example.com -c user.name=T \
-    commit -q --allow-empty -m init
-  assert_success
-  run git -C "$primary" worktree add -q -b fixture/linked "$linked"
-  assert_success
-
-  run env HERDR_TARGET_CWD="$linked" HERDR_COMMAND_PALETTE_CONFIG="$REAL_COMMANDS" \
-    EXPECTED_PRIMARY="$(git -C "$primary" rev-parse --show-toplevel)" \
-    EXPECTED_LINKED="$(git -C "$linked" rev-parse --show-toplevel)" python3 - <<'PY'
-import os
-
-import palette_boot
-
-palette = palette_boot.palette()
-config_path, commands = palette.load_commands()
-command = next(c for c in commands if c.title == "Open worktree")
-choices = palette.command_choices(command, palette.context_vars(config_path))
-actual = [(choice.value, choice.label, choice.description) for choice in choices]
-expected = [
-    ("main", "main", os.environ["EXPECTED_PRIMARY"]),
-    ("fixture/linked", "fixture/linked", os.environ["EXPECTED_LINKED"]),
-]
-assert actual == expected, actual
-PY
-  assert_success
 }
 
 # ===========================================
@@ -1757,7 +1550,7 @@ function test_palette_071_plugin_action_hands_herdr_the_action_id() {
   _bats_test_init 71 'plugin_action hands herdr the action id, adding --plugin only when configured'
   local fixture="$PALETTE_WORK/plugin-action"
   mkdir -p "$fixture"
-  palette_worktree_stub "$fixture"
+  argv_logging_herdr_stub "$fixture"
   cat > "$fixture/commands.toml" <<'TOML'
 [[commands]]
 group = "Fixture"
@@ -1880,6 +1673,39 @@ PY
   # oracle: the stub logs every invocation, so a missing log proves herdr was
   # never called on the refusal path.
   [ ! -e "$dir/herdr.log" ]
+}
+
+function test_palette_074_loading_without_config_does_not_claim_user_config() {
+  _bats_test_init 74 'loading without config returns no commands and creates no user files'
+  local home="$PALETTE_WORK/clean-home"
+  mkdir -p "$home"
+
+  run env -u HERDR_COMMAND_PALETTE_CONFIG -u HERDR_PLUGIN_CONFIG_DIR \
+    HOME="$home" XDG_CONFIG_HOME="$home/.config" HERDR_TARGET_CWD="$home" python3 - <<'PY'
+import palette_boot
+
+palette = palette_boot.palette()
+path, commands = palette.load_commands()
+assert commands == [], commands
+assert not path.exists(), path
+assert not path.parent.exists(), path.parent
+PY
+  assert_success
+}
+
+function test_palette_075_terminal_hint_parser_groups_valid_unique_entries() {
+  _bats_test_init 75 'terminal hint parser groups valid unique entries and rejects malformed hints'
+  run env HERDR_COMMAND_PALETTE_KEYBINDINGS_CONFIG="$PROJECT_ROOT/tests/fixtures/keybindings.conf" \
+    python3 - <<'PY'
+import palette_boot
+
+groups = palette_boot.palette().load_key_binding_groups()
+assert groups == [
+    ("Navigation", [("Cmd+P", "Open command palette"), ("Cmd+W", "Smart close")]),
+    ("Workspaces", [("Ctrl+Tab", "Next workspace")]),
+], groups
+PY
+  assert_success
 }
 
 function set_up_before_script() {

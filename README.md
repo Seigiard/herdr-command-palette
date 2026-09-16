@@ -30,7 +30,8 @@ remove the plugin while preserving user configuration and state:
 herdr plugin uninstall seigi.command-palette
 ```
 
-The plugin never creates or rewrites command configuration.
+The plugin never creates or rewrites command configuration. With no catalog it
+opens with no commands; create the user file below before adding entries.
 
 ## Configuration
 

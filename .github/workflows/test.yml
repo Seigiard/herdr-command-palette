@@ -25,5 +25,55 @@ jobs:
         run: |
           go install github.com/junegunn/fzf@v0.65.2
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Install Herdr
+        run: bash tests/ci/install-herdr.sh
       - run: make lint
       - run: make test
+
+  lifecycle:
+    if: github.event_name == 'push'
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+      - name: Install Herdr
+        run: bash tests/ci/install-herdr.sh
+      - name: Exercise install, update, and removal
+        env:
+          REPOSITORY: ${{ github.repository }}
+          REVISION: ${{ github.sha }}
+        run: |
+          clean_home="$(mktemp -d)"
+          previous_revision="$(git rev-parse HEAD^)"
+          config="$clean_home/.config/herdr/command-palette/commands.toml"
+
+          HOME="$clean_home" herdr plugin install "$REPOSITORY" --ref "$previous_revision" -y
+          test ! -e "$config"
+          mkdir -p "$(dirname "$config")"
+          printf '[[commands]]\ntitle = "No-op"\ntype = "shell"\ncommand = "true"\n' > "$config"
+          cp "$config" "$clean_home/commands.expected"
+          HOME="$clean_home" herdr plugin install "$REPOSITORY" --ref "$REVISION" -y
+          HOME="$clean_home" herdr plugin enable seigi.command-palette
+
+          plugin_root="$(HOME="$clean_home" herdr plugin list --json | python3 -c '
+          import json, sys
+          plugins = json.load(sys.stdin)["result"]["plugins"]
+          print(next(plugin["plugin_root"] for plugin in plugins if plugin["plugin_id"] == "seigi.command-palette"))
+          ')"
+          mkdir -p "$clean_home/bin"
+          cat > "$clean_home/bin/fzf" <<'SH'
+          #!/bin/sh
+          [ "$1" = --version ] && { printf '0.56.0\n'; exit 0; }
+          exit 130
+          SH
+          chmod +x "$clean_home/bin/fzf"
+          HOME="$clean_home" PATH="$clean_home/bin:$PATH" TERM=xterm \
+            script --quiet --return --command "python3 '$plugin_root/palette.py'" /dev/null
+
+          HOME="$clean_home" herdr plugin uninstall seigi.command-palette
+          cmp "$clean_home/commands.expected" "$config"
