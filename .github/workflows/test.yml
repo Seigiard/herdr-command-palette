@@ -44,6 +44,7 @@ jobs:
       - name: Install Herdr
         run: bash tests/ci/install-herdr.sh
       - name: Exercise install, update, and removal
+        timeout-minutes: 2
         env:
           REPOSITORY: ${{ github.repository }}
           REVISION: ${{ github.sha }}
@@ -76,7 +77,7 @@ jobs:
           exit 130
           SH
           chmod +x "$clean_home/bin/fzf"
-          HOME="$clean_home" XDG_CONFIG_HOME="$config_home" PATH="$clean_home/bin:$PATH" TERM=xterm \
+          printf '\033' | HOME="$clean_home" XDG_CONFIG_HOME="$config_home" PATH="$clean_home/bin:$PATH" TERM=xterm \
             script --quiet --return --command "python3 '$plugin_root/palette.py'" /dev/null
 
           run_in_clean_home herdr plugin uninstall seigi.command-palette
