@@ -568,6 +568,32 @@ PY
   assert_output --partial "checked"
 }
 
+function test_palette_021_fzf_056_full_rows_map_back_to_command_indices() {
+  _bats_test_init 21 'fzf 0.56-style full rows map back to command indices'
+  local stub="$PALETTE_WORK/fzf-full-rows"
+  mkdir -p "$stub"
+  cat > "$stub/fzf" <<'SH'
+#!/usr/bin/env bash
+if [[ "$1" == --version ]]; then
+  printf '0.56.0\n'
+  exit 0
+fi
+cat >/dev/null
+printf '1\tSecond command\n0\tFirst command\n'
+SH
+  chmod +x "$stub/fzf"
+
+  run env FZF_STUB="$stub/fzf" python3 - <<'PY'
+import os
+
+import palette_boot
+
+palette = palette_boot.palette()
+assert palette.fzf_filter("command", ["First command", "Second command"], os.environ["FZF_STUB"]) == [1, 0]
+PY
+  assert_success
+}
+
 function test_palette_026_r10_a_decoy_title_cannot_displace_a_shortcut_hit() {
   _bats_test_init 26 'R10: a decoy title cannot displace a shortcut hit'
   cp "$REAL_COMMANDS" "$PALETTE_WORK/commands.toml"

@@ -33,8 +33,7 @@ ESC = "\x1b["
 RUNNABLE_KINDS = {"herdr", "pane_run", "tab_run", "workspace_picker", "shell", "overlay_shell", "plugin_action"}
 COMMAND_KINDS = RUNNABLE_KINDS | {"select", "form"}
 
-# fzf scores; the palette renders. 0.56 is the release that added --accept-nth,
-# which is how a match finds its way back to a Command object.
+# fzf scores; the palette renders. 0.56 is the supported package floor.
 FZF_MIN_VERSION = (0, 56)
 # Measured at 3.0-3.2 ms median across 10/100/1000 rows on this machine: the
 # cost is process spawn, not search, so it does not grow with the command list.
@@ -605,7 +604,7 @@ def resolve_fzf() -> str:
         fail_hard_dependency(
             fzf_requirement_message(
                 f"fzf {version[0]}.{version[1]} at {fzf} is too old; "
-                f"--accept-nth needs {FZF_MIN_VERSION[0]}.{FZF_MIN_VERSION[1]} or newer."
+                f"the palette needs {FZF_MIN_VERSION[0]}.{FZF_MIN_VERSION[1]} or newer."
             )
         )
     _fzf_binary = fzf
@@ -630,10 +629,10 @@ def sanitize_field(text: str) -> str:
 def fzf_filter(query: str, values: list[str], fzf: str) -> list[int] | None:
     """Rank `values` against `query`, best first, and return their indices.
 
-    Rows are `<index>\\t<value>`; --nth 2 searches the value column only and
-    --accept-nth {1} returns the index, so what is matched and what is returned
-    stay independent of what is displayed. --delimiter is not optional: fzf's
-    default is AWK whitespace, which would split a value with a space in it.
+    Rows are `<index>\\t<value>`; --nth 2 searches the value column only and the
+    first field maps the returned row to its original index. --delimiter is not
+    optional: fzf's default is AWK whitespace, which would split a value with a
+    space in it.
     -i is not optional either: fzf defaults to smart case, so an uppercase
     letter in the query would switch it to case-sensitive matching while the
     shortcut tier keeps case-folding, and `Git` would find nothing.
@@ -653,7 +652,7 @@ def fzf_filter(query: str, values: list[str], fzf: str) -> list[int] | None:
     rows = "\n".join(f"{index}\t{sanitize_field(value)}" for index, value in enumerate(values))
     try:
         result = subprocess.run(
-            [fzf, "--filter", query, "-i", "--delimiter", "\t", "--nth", "2", "--accept-nth", "{1}"],
+            [fzf, "--filter", query, "-i", "--delimiter", "\t", "--nth", "2"],
             input=rows,
             text=True,
             capture_output=True,
@@ -677,9 +676,9 @@ def fzf_filter(query: str, values: list[str], fzf: str) -> list[int] | None:
 
     indices: list[int] = []
     for line in result.stdout.splitlines():
-        line = line.strip()
-        if line.isdigit():
-            indices.append(int(line))
+        index = line.split("\t", 1)[0]
+        if index.isdigit():
+            indices.append(int(index))
     return indices
 
 
