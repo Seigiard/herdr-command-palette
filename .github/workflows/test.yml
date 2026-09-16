@@ -49,18 +49,22 @@ jobs:
           REVISION: ${{ github.sha }}
         run: |
           clean_home="$(mktemp -d)"
+          config_home="$clean_home/config"
           previous_revision="$(git rev-parse HEAD^)"
-          config="$clean_home/.config/herdr/command-palette/commands.toml"
+          config="$config_home/herdr/command-palette/commands.toml"
 
-          HOME="$clean_home" herdr plugin install "$REPOSITORY" --ref "$previous_revision" -y
+          run_in_clean_home() {
+            HOME="$clean_home" XDG_CONFIG_HOME="$config_home" "$@"
+          }
+
+          run_in_clean_home herdr plugin install "$REPOSITORY" --ref "$previous_revision" -y
           test ! -e "$config"
           mkdir -p "$(dirname "$config")"
           printf '[[commands]]\ntitle = "No-op"\ntype = "shell"\ncommand = "true"\n' > "$config"
           cp "$config" "$clean_home/commands.expected"
-          HOME="$clean_home" herdr plugin install "$REPOSITORY" --ref "$REVISION" -y
-          HOME="$clean_home" herdr plugin enable seigi.command-palette
+          run_in_clean_home herdr plugin install "$REPOSITORY" --ref "$REVISION" -y
 
-          plugin_root="$(HOME="$clean_home" herdr plugin list --json | python3 -c '
+          plugin_root="$(run_in_clean_home herdr plugin list --json | python3 -c '
           import json, sys
           plugins = json.load(sys.stdin)["result"]["plugins"]
           print(next(plugin["plugin_root"] for plugin in plugins if plugin["plugin_id"] == "seigi.command-palette"))
@@ -72,8 +76,8 @@ jobs:
           exit 130
           SH
           chmod +x "$clean_home/bin/fzf"
-          HOME="$clean_home" PATH="$clean_home/bin:$PATH" TERM=xterm \
+          HOME="$clean_home" XDG_CONFIG_HOME="$config_home" PATH="$clean_home/bin:$PATH" TERM=xterm \
             script --quiet --return --command "python3 '$plugin_root/palette.py'" /dev/null
 
-          HOME="$clean_home" herdr plugin uninstall seigi.command-palette
+          run_in_clean_home herdr plugin uninstall seigi.command-palette
           cmp "$clean_home/commands.expected" "$config"
