@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import termios
+import time
 import tty
 import ast
 from dataclasses import dataclass
@@ -44,6 +45,7 @@ FZF_TIMEOUT_SECONDS = 2
 # stuck server, not a busy one. Tests can widen the bound under parallel load
 # without changing the shipped default.
 HERDR_CALL_TIMEOUT_SECONDS = float(os.environ.get("HERDR_COMMAND_PALETTE_CALL_TIMEOUT_SECONDS", "2"))
+PLUGIN_ACTION_WAIT_SECONDS = 5
 
 # open.py stamps the palette's pane with this token so a second press of the
 # keybinding finds the open palette instead of nesting a new one. Both values
@@ -1352,18 +1354,13 @@ def pick_workspace(herdr: str) -> tuple[int, str, bool]:
     workspace_id = workspace.get("workspace_id")
     if not workspace_id:
         return 1, "Selected workspace has no id", True
-    subprocess.Popen(
-        [
-            "bash",
-            "-lc",
-            f"sleep 0.2; exec {shlex.quote(herdr)} workspace focus {shlex.quote(str(workspace_id))}",
-        ],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
+    # The picker has ended its curses session. Complete focus before exiting so
+    # a rejected target stays visible instead of failing in a detached shell.
+    result = subprocess.run(
+        [herdr, "workspace", "focus", str(workspace_id)],
+        text=True, capture_output=True, timeout=HERDR_CALL_TIMEOUT_SECONDS,
     )
-    return 0, "", False
+    return result.returncode, (result.stdout or "") + (result.stderr or ""), result.returncode != 0
 
 
 OPTIONS_COMMAND_TIMEOUT = 10
@@ -1924,6 +1921,61 @@ def run_command(command: Command, config_path: Path) -> tuple[int, str, bool]:
     return run_command_with_variables(command, config_path, variables, herdr)
 
 
+def plugin_action_result(herdr: str, action: str, invoked: subprocess.CompletedProcess, pause: bool) -> tuple[int, str, bool]:
+    """Follow the accepted run, not other runs of the same action."""
+    if invoked.returncode != 0:
+        return invoked.returncode, (invoked.stdout or "") + (invoked.stderr or ""), True
+
+    def unverified(reason: str) -> tuple[int, str, bool]:
+        return 1, f"Could not verify plugin action {action}: {reason}", True
+
+    try:
+        log = json.loads(invoked.stdout)["result"]["log"]
+        plugin_id, log_id = log["plugin_id"], log["log_id"]
+        if not isinstance(plugin_id, str) or not plugin_id or not isinstance(log_id, str) or not log_id:
+            raise ValueError("missing run identifiers")
+    except (KeyError, TypeError, ValueError):
+        return unverified("invoke returned no valid plugin_id and log_id")
+
+    deadline = time.monotonic() + PLUGIN_ACTION_WAIT_SECONDS
+    while True:
+        if log is not None:
+            status = log.get("status")
+            if status in ("failed", "succeeded"):
+                output = "".join(str(log.get(key) or "") for key in ("stdout", "stderr"))
+            if status == "failed":
+                exit_code = log.get("exit_code")
+                code = exit_code if type(exit_code) is int and exit_code != 0 else 1
+                error = str(log.get("error") or "")
+                return code, f"Plugin action {action} failed ({code}).\n{error}\n{output}", True
+            if status == "succeeded":
+                return 0, output, pause
+            if status != "running":
+                return unverified(f"unknown run status {status!r}")
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            if log is not None:
+                return 0, f"Plugin action {action} is still running ({log_id}).", pause
+            return unverified(f"run {log_id} was not found in plugin logs")
+        try:
+            result = subprocess.run(
+                [herdr, "plugin", "log", "list", "--plugin", plugin_id],
+                text=True, capture_output=True, timeout=min(HERDR_CALL_TIMEOUT_SECONDS, remaining),
+            )
+            if result.returncode != 0:
+                return unverified((result.stderr or result.stdout or "plugin log list failed").strip())
+            logs = json.loads(result.stdout)["result"]["logs"]
+            if not isinstance(logs, list):
+                raise ValueError("plugin log list returned no log array")
+            log = next((entry for entry in logs if isinstance(entry, dict)
+                        and entry.get("log_id") == log_id and entry.get("plugin_id") == plugin_id), None)
+        except (OSError, subprocess.TimeoutExpired, KeyError, TypeError, ValueError) as exc:
+            return unverified(str(exc))
+        if log is None or log.get("status") == "running":
+            time.sleep(min(0.1, max(0, deadline - time.monotonic())))
+
+
 def run_command_with_variables(command: Command, config_path: Path, variables: dict[str, str], herdr: str) -> tuple[int, str, bool]:
     raw = command.raw
     pause = bool(raw.get("pause", False))
@@ -1946,8 +1998,8 @@ def run_command_with_variables(command: Command, config_path: Path, variables: d
         return result.returncode, format_output(raw, output), pause
 
     if command.kind == "workspace_picker":
-        # Workspace picker opens its own short curses session and focuses the
-        # selected workspace asynchronously. It intentionally ignores pause.
+        # Workspace picker ends its curses session before focusing the choice.
+        # It intentionally ignores pause.
         return pick_workspace(herdr)
 
     if command.kind == "pane_run":
@@ -1970,9 +2022,8 @@ def run_command_with_variables(command: Command, config_path: Path, variables: d
         if not tab_command:
             raise ValueError(f"{command.title}: tab_run requires command")
         label = expand(raw.get("label", command.title), variables)
-        # Herdr restores focus to the pane that opened the overlay when the
-        # plugin pane exits. Create the tab unfocused, start the command there,
-        # then schedule a tiny delayed focus after the overlay closes.
+        # Start the command before focusing its tab. A failed dispatch must keep
+        # the palette visible so the user can read the error.
         create = [herdr, "tab", "create", "--no-focus"]
         if variables["target_cwd"]:
             create.extend(["--cwd", variables["target_cwd"]])
@@ -1995,20 +2046,14 @@ def run_command_with_variables(command: Command, config_path: Path, variables: d
         if not pane_id:
             return 1, output + "\nCould not find root pane for created tab.", True
         run = subprocess.run([herdr, "pane", "run", str(pane_id), str(tab_command)], text=True, capture_output=True)
+        output += (run.stdout or "") + (run.stderr or "")
         if run.returncode == 0 and tab_id:
-            delay = str(raw.get("focus_delay", 0.2))
-            subprocess.Popen(
-                [
-                    "bash",
-                    "-lc",
-                    f"sleep {shlex.quote(delay)}; exec {shlex.quote(herdr)} tab focus {shlex.quote(str(tab_id))}",
-                ],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
+            focused = subprocess.run(
+                [herdr, "tab", "focus", str(tab_id)],
+                text=True, capture_output=True, timeout=HERDR_CALL_TIMEOUT_SECONDS,
             )
-        return run.returncode, output + (run.stdout or "") + (run.stderr or ""), pause
+            return focused.returncode, output + (focused.stdout or "") + (focused.stderr or ""), pause or focused.returncode != 0
+        return run.returncode, output, pause
 
     if command.kind == "plugin_action":
         action = expand(raw.get("action", ""), variables)
@@ -2018,8 +2063,8 @@ def run_command_with_variables(command: Command, config_path: Path, variables: d
         plugin = expand(raw.get("plugin", ""), variables)
         if plugin:
             invoke.extend(["--plugin", str(plugin)])
-        result = subprocess.run(invoke, text=True, capture_output=True)
-        return result.returncode, (result.stdout or "") + (result.stderr or ""), pause
+        result = subprocess.run(invoke, text=True, capture_output=True, timeout=HERDR_CALL_TIMEOUT_SECONDS)
+        return plugin_action_result(herdr, str(action), result, pause)
 
     raw_shell_command = raw.get("command", "")
     shell_command = expand(raw_shell_command, variables)

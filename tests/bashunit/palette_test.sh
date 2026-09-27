@@ -116,6 +116,7 @@ function test_palette_004_palette_sources_compile() {
   run python3 -m py_compile \
     "$PALETTE_DIR/palette.py" \
     "$PALETTE_DIR/open.py" \
+    "$PALETTE_DIR/open_popup.py" \
     "$PALETTE_DIR/open_in_zed.py" \
     "$PALETTE_DIR/smart_close.py"
   assert_success
@@ -1065,6 +1066,111 @@ function test_palette_043_r4_tab_run_creates_a_tab_and_never_consults_the() {
 # U6 -- finding an already-open palette
 # ===========================================
 
+function test_palette_focus_reports_failure_instead_of_detaching_it() {
+  _bats_test_init 430 'workspace and tab focus failures stay visible instead of vanishing in a detached process'
+  run python3 - <<'PY'
+import json
+import subprocess
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+import palette_boot
+
+palette = palette_boot.palette()
+
+def result(code=0, stdout="", stderr=""):
+    return subprocess.CompletedProcess([], code, stdout, stderr)
+
+class FocusOutcome(unittest.TestCase):
+    def test_workspace_focus_reports_the_selected_target_failure(self):
+        # #given: the selected workspace disappears before focus.
+        workspace = {"workspace_id": "w9"}
+        replies = [result(stdout=json.dumps({"result": {"workspaces": [workspace]}})), result(1, stderr="workspace not found")]
+        with patch.object(palette.subprocess, "run", side_effect=replies) as calls, \
+             patch.object(palette.subprocess, "Popen"), \
+             patch.object(palette, "pick_workspace_curses", return_value=workspace):
+            # #when
+            outcome = palette.pick_workspace("herdr")
+        # #then
+        self.assertEqual(outcome, (1, "workspace not found", True))
+        self.assertEqual(calls.call_args.args[0], ["herdr", "workspace", "focus", "w9"])
+
+    def test_tab_focus_reports_the_created_target_failure(self):
+        # #given
+        command = palette.Command("New tab", "", "tab_run", "", {"command": "true"})
+        created = json.dumps({"result": {"tab": {"tab_id": "w1:t9"}, "root_pane": {"pane_id": "w1:p9"}}})
+        replies = [result(stdout=created), result(), result(1, stderr="tab not found")]
+        with patch.object(palette.subprocess, "run", side_effect=replies) as calls, patch.object(palette.subprocess, "Popen"):
+            # #when
+            code, output, pause = palette.run_command_with_variables(command, Path("unused"), {"target_cwd": ""}, "herdr")
+        # #then
+        self.assertEqual((code, output.endswith("tab not found"), pause), (1, True, True))
+        self.assertEqual(calls.call_args.args[0], ["herdr", "tab", "focus", "w1:t9"])
+
+    def test_failed_pane_command_does_not_focus_the_tab(self):
+        # #given
+        command = palette.Command("New tab", "", "tab_run", "", {"command": "true"})
+        created = json.dumps({"result": {"tab": {"tab_id": "w1:t9"}, "root_pane": {"pane_id": "w1:p9"}}})
+        replies = [result(stdout=created), result(1, stderr="pane run failed")]
+        with patch.object(palette.subprocess, "run", side_effect=replies) as calls, patch.object(palette.subprocess, "Popen"):
+            # #when
+            code, output, _ = palette.run_command_with_variables(command, Path("unused"), {"target_cwd": ""}, "herdr")
+        # #then
+        self.assertEqual((code, output.endswith("pane run failed"), calls.call_count), (1, True, 2))
+
+unittest.main()
+PY
+  assert_success
+}
+
+function test_palette_focus_and_action_dispatch_stop_waiting_for_a_stalled_cli() {
+  _bats_test_init 431 'focus and action dispatch stop waiting when the Herdr CLI stalls'
+  run python3 - <<'PY'
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+from unittest.mock import patch
+
+import palette_boot
+
+palette = palette_boot.palette()
+
+class StalledDispatch(unittest.TestCase):
+    def test_focus_and_invoke_raise_a_timeout_for_the_error_screen(self):
+        # #given: lookup/create work; focus and invoke outlast the CLI budget.
+        with tempfile.TemporaryDirectory() as directory:
+            herdr = Path(directory) / "herdr"
+            herdr.write_text('''#!/bin/sh
+case "$1 $2" in
+  "workspace list") printf '%s' '{"result":{"workspaces":[{"workspace_id":"w9"}]}}' ;;
+  "tab create") printf '%s' '{"result":{"tab":{"tab_id":"w1:t9"},"root_pane":{"pane_id":"w1:p9"}}}' ;;
+  "pane run") exit 0 ;;
+  *) exec sleep 1 ;;
+esac
+''')
+            herdr.chmod(0o755)
+            for kind, raw, expected in [
+                ("workspace_picker", {}, ["workspace", "focus", "w9"]),
+                ("tab_run", {"command": "true"}, ["tab", "focus", "w1:t9"]),
+                ("plugin_action", {"action": "probe"}, ["plugin", "action", "invoke", "probe"]),
+            ]:
+                with self.subTest(kind=kind), \
+                     patch.object(palette, "HERDR_CALL_TIMEOUT_SECONDS", 0.2), \
+                     patch.object(palette, "pick_workspace_curses", return_value={"workspace_id": "w9"}):
+                    command = palette.Command("Probe", "", kind, "", raw)
+                    # #when
+                    with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                        palette.run_command_with_variables(command, Path("unused"), {"target_cwd": ""}, str(herdr))
+                    # #then: the command, not an earlier lookup, hit the bound.
+                    self.assertEqual(caught.exception.cmd, [str(herdr), *expected])
+
+unittest.main()
+PY
+  assert_success
+}
+
 # A `herdr` on PATH for open.py. MODE decides what `pane list` reports:
 #   token -- a pane carrying the palette's own metadata token
 #   argv  -- a pane that merely MENTIONS palette.py (an editor, a grep, an agent)
@@ -1436,6 +1542,7 @@ argv_logging_herdr_stub() {
   cat > "$fixture/bin/herdr" <<STUB
 #!/usr/bin/env bash
 printf '%s\n' "\$@" >> "$fixture/herdr.log"
+printf '%s\n' '{"result":{"log":{"log_id":"plugin-log-1","plugin_id":"seigi.other","status":"succeeded","exit_code":0}}}'
 exit 0
 STUB
   chmod +x "$fixture/bin/herdr"
@@ -1616,6 +1723,177 @@ TOML
   assert_line --index 3 "toggle_thing"
   assert_line --index 4 -- "--plugin"
   assert_line --index 5 "seigi.other"
+}
+
+function test_palette_plugin_action_reports_the_run_outcome() {
+  _bats_test_init 710 'plugin_action reports failure from the matching run, not invoke acceptance'
+  run python3 - <<'PY'
+import itertools
+import json
+import subprocess
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+import palette_boot
+
+palette = palette_boot.palette()
+
+def response(result, code=0, stderr=""):
+    return subprocess.CompletedProcess([], code, json.dumps({"result": result}), stderr)
+
+def log(status, **fields):
+    return {"log_id": "plugin-log-9", "plugin_id": "test.palette-probe", "status": status, **fields}
+
+class ActionOutcome(unittest.TestCase):
+    def run_action(self, replies):
+        command = palette.Command("Probe", "", "plugin_action", "", {"action": "fail"})
+        with patch.object(palette.subprocess, "run", side_effect=replies) as calls, \
+             patch("time.monotonic", side_effect=itertools.count()), patch("time.sleep"):
+            outcome = palette.run_command_with_variables(command, Path("unused"), {}, "herdr")
+        return outcome, calls
+
+    def test_failed_action_keeps_its_exit_code_and_diagnostic(self):
+        # #given: invoke is accepted; the requested run then exits 127.
+        replies = [response({"log": log("running")}), response({"logs": [
+            log("succeeded", log_id="another-run", exit_code=0),
+            log("failed", exit_code=127, stderr="probe-failed\n"),
+        ]})]
+        # #when
+        (code, output, pause), calls = self.run_action(replies)
+        # #then: a failed action reaches the existing error screen.
+        self.assertEqual((code, "probe-failed\n" in output, pause), (127, True, True))
+        self.assertEqual(calls.call_args_list[1].args[0], ["herdr", "plugin", "log", "list", "--plugin", "test.palette-probe"])
+
+    def test_success_uses_action_output(self):
+        # #given
+        replies = [response({"log": log("running")}), response({"logs": [log("succeeded", exit_code=0, stdout="finished\n")]})]
+        # #when
+        outcome, _ = self.run_action(replies)
+        # #then
+        self.assertEqual(outcome, (0, "finished\n", False))
+
+    def test_spawn_failure_without_exit_code_is_still_failure(self):
+        # #given
+        replies = [response({"log": log("failed", error="No such file or directory")})]
+        # #when
+        (code, output, pause), _ = self.run_action(replies)
+        # #then
+        self.assertEqual((code, "No such file or directory" in output, pause), (1, True, True))
+
+    def test_running_at_deadline_is_not_failed(self):
+        # #given
+        replies = [response({"log": log("running")})] + [response({"logs": [log("running")]})] * 10
+        # #when
+        (code, output, pause), _ = self.run_action(replies)
+        # #then
+        self.assertEqual((code, "still running" in output, pause), (0, True, False))
+
+    def test_unverifiable_runs_are_reported(self):
+        # #given: no trustworthy terminal state is available.
+        cases = [
+            [response({})],
+            [subprocess.CompletedProcess([], 0, "not json", "")],
+            [response({"log": log("running")}), response({}, 1, "log service failed")],
+            [response({"log": log("running")}), subprocess.TimeoutExpired("herdr", 2)],
+            [response({"log": log("running")}), response({"logs": "not a list"})],
+            [response({"log": log("running")})] + [response({"logs": []})] * 10,
+            [response({"log": log("unknown")})],
+        ]
+        for replies in cases:
+            with self.subTest(replies=replies):
+                # #when
+                (code, output, pause), _ = self.run_action(replies)
+                # #then
+                self.assertEqual((code, "Could not verify" in output, pause), (1, True, True))
+
+    def test_invoke_rejection_is_not_polled(self):
+        # #given
+        replies = [subprocess.CompletedProcess([], 1, "", "action not found")]
+        # #when
+        outcome, calls = self.run_action(replies)
+        # #then
+        self.assertEqual((outcome, calls.call_count), ((1, "action not found", True), 1))
+
+unittest.main()
+PY
+  assert_success
+}
+
+function test_palette_popup_launcher_retries_only_an_occupied_slot() {
+  _bats_test_init 711 'popup launcher waits for an occupied slot and reports other failures'
+  run python3 - <<'PY'
+import importlib.util
+import itertools
+import json
+import os
+from pathlib import Path
+import subprocess
+import unittest
+from unittest.mock import patch
+
+spec = importlib.util.spec_from_file_location("open_popup", Path(os.environ["PALETTE_PY"]).with_name("open_popup.py"))
+popup = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(popup)
+
+def failure(code, message):
+    return subprocess.CompletedProcess([], 1, "", json.dumps({"error": {"code": code, "message": message}}))
+
+class PopupHandoff(unittest.TestCase):
+    def invoke(self, replies):
+        with patch.object(popup.subprocess, "run", side_effect=replies) as calls, \
+             patch.object(popup.time, "monotonic", side_effect=itertools.count()), patch.object(popup.time, "sleep"):
+            outcome = popup.open_when_ready("herdr", ["--entrypoint", "lazygit", "--cwd", "/a b"])
+        return outcome, calls
+
+    def test_busy_slot_is_retried_until_the_popup_opens(self):
+        # #given: the real 0.9.1 busy response observed in the live probe.
+        replies = [failure("ui_busy", "a popup pane is already open")] * 3
+        replies += [subprocess.CompletedProcess([], 0, '{"result":{"type":"ok"}}', "")]
+        # #when
+        outcome, calls = self.invoke(replies)
+        # #then
+        self.assertEqual((outcome, calls.call_count, calls.call_args.args[0]), ((0, ""), 4, ["herdr", "plugin", "pane", "open", "--entrypoint", "lazygit", "--cwd", "/a b"]))
+
+    def test_other_errors_are_not_retried(self):
+        # #given
+        error = failure("plugin_not_found", "unknown plugin")
+        # #when
+        outcome, calls = self.invoke([error])
+        # #then
+        self.assertEqual((outcome, calls.call_count), ((1, error.stderr), 1))
+
+    def test_busy_deadline_reports_failure(self):
+        # #given
+        replies = [failure("ui_busy", "a popup pane is already open")] * 12
+        # #when
+        (code, output), _ = self.invoke(replies)
+        # #then
+        self.assertEqual((code, "did not release the popup slot" in output), (1, True))
+
+    def test_unreachable_server_is_not_retried(self):
+        # #given
+        for error in (OSError("missing executable"), subprocess.TimeoutExpired("herdr", 2)):
+            with self.subTest(error=error):
+                # #when
+                outcome, calls = self.invoke([error])
+                # #then
+                self.assertEqual((outcome, calls.call_count), ((1, str(error)), 1))
+
+    def test_background_failure_notifies_the_user(self):
+        # #given
+        error = failure("plugin_not_found", "unknown plugin")
+        with patch.object(popup.sys, "argv", ["open_popup.py", "--wait", "--entrypoint", "missing"]), \
+             patch.dict(os.environ, {"HERDR_BIN_PATH": "herdr"}), \
+             patch.object(popup.subprocess, "run", side_effect=[error, subprocess.CompletedProcess([], 0)]) as calls:
+            # #when
+            code = popup.main()
+        # #then
+        self.assertEqual((code, calls.call_args.args[0]), (1, ["herdr", "notification", "show", "Command palette popup failed", "--body", error.stderr]))
+
+unittest.main()
+PY
+  assert_success
 }
 
 function test_palette_072_a_shell_command_appends_the_value_as_one_inert_ar() {

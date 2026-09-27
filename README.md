@@ -80,7 +80,9 @@ python3 palette.py --validate ~/.config/herdr/command-palette/commands.toml
 - `tab_run`: create a tab and run a command there.
 - `shell`: run in the popup and optionally pause for output.
 - `overlay_shell`: replace the popup with an interactive command.
-- `plugin_action`: invoke another plugin action.
+- `plugin_action`: invoke another plugin action and check its run log for up to
+  five seconds. Failures stay on screen until a key is pressed. An action still
+  running after that window is left running; later failures are not monitored.
 - `workspace_picker`: choose and focus a workspace.
 - `select`: choose a static or dynamically generated value, then run a nested command.
 - `form`: collect text, then run a nested command.
@@ -102,6 +104,26 @@ shortcut.
   final tab in a workspace.
 
 The manifest also provides `palette` and `lazygit` pane entrypoints.
+
+### Opening another popup
+
+Herdr allows one popup at a time. Use the popup launcher to open a successor
+after the palette closes, rather than guessing a teardown delay:
+
+```toml
+[[commands]]
+title = "Lazygit in popup"
+type = "shell"
+pause = false
+command = "python3 {plugin_root_q}/open_popup.py --plugin seigi.command-palette --entrypoint lazygit --width 90% --height 90% --cwd {target_cwd_q} --focus"
+```
+
+The detached launcher retries only Herdr's popup-busy response, for up to ten
+seconds. Other errors stop immediately and request a Herdr notification.
+`pause = false` lets the palette release its popup slot.
+
+Tab and workspace commands focus their targets synchronously after their
+pickers finish. The former `focus_delay` setting is no longer used.
 
 ## Development
 
