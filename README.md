@@ -127,6 +127,11 @@ pickers finish. The former `focus_delay` setting is no longer used.
 
 ## Development
 
+Install Lefthook 2.2.1 or newer (`brew install lefthook` on macOS), then run
+`make install-git-hooks` once per clone. Before commit, it runs `make lint` for
+staged Python or shell changes and checks staged whitespace. Tests use the
+manual command below.
+
 ```bash
 make lint
 make test

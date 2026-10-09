@@ -1,4 +1,6 @@
-.PHONY: test lint
+.PHONY: test lint install-git-hooks
+
+LEFTHOOK ?= lefthook
 
 test:
 	tests/lib/bashunit -j 8 tests/bashunit/palette_test.sh
@@ -6,3 +8,6 @@ test:
 lint:
 	python3 -m py_compile palette.py open.py open_popup.py open_in_zed.py smart_close.py
 	bash -n tests/bashunit/palette_test.sh tests/bashunit/test-dsl.bash tests/helpers/common.bash tests/ci/install-herdr.sh
+
+install-git-hooks:
+	$(LEFTHOOK) install
